@@ -62,6 +62,8 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
     _interpreter = await Interpreter.fromAsset(
       'assets/cough_model_quant.tflite',
     );
+    _interpreter!.allocateTensors();
+
     // Debug: Print input and output tensor details
     var inputTensors = _interpreter!.getInputTensors();
     var outputTensors = _interpreter!.getOutputTensors();
@@ -108,6 +110,11 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
         setState(() => _result = 'Erro: Áudio vazio');
         return;
       }
+
+      if (_interpreter == null) {
+        throw Exception('Modelo ainda não carregado');
+      }
+
       List<double> normalized = _normalizeAudio(audioData);
       List<double> denoised = _removeNoise(normalized);
       List<List<double>> spectrogram = _generateSpectrogram(denoised);
@@ -123,12 +130,17 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
           flatInput.add(val); // B
         }
       }
-      var input = [Int8List.fromList(flatInput)];
-      var output = [Int8List(3)];
-      _interpreter!.run(input, output);
+
+      final Int8List input = Int8List.fromList(flatInput);
+      final reshapedInput = input.reshape([1, 128, 128, 3]);
+
+      final Int8List outputBuffer = Int8List(3);
+      final reshapedOutput = outputBuffer.reshape([1, 3]);
+
+      _interpreter!.run(reshapedInput, reshapedOutput);
 
       // Get result - scale back to probabilities
-      List<double> probabilities = output[0]
+      List<double> probabilities = outputBuffer
           .map((e) => ((e + 128) / 255.0).clamp(0.0, 1.0))
           .toList();
       int maxIndex = probabilities.indexOf(probabilities.reduce(max));
@@ -188,9 +200,9 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
 
   @override
   void dispose() {
-    _recorder!.closeRecorder();
-    _player!.closePlayer();
-    _interpreter!.close();
+    _recorder?.closeRecorder();
+    _player?.closePlayer();
+    _interpreter?.close();
     super.dispose();
   }
 
