@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
-import 'package:flutter/foundation.dart';
+import 'package:fftea/fftea.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_sound/flutter_sound.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -14,6 +14,7 @@ void main() {
   runApp(const MyApp());
 }
 
+// APLICATIVO MÓVEL (Root da estrutura)
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -34,6 +35,7 @@ class CoughAnalysisPage extends StatefulWidget {
   _CoughAnalysisPageState createState() => _CoughAnalysisPageState();
 }
 
+// ANALIZADOR DA TOSSE
 class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
   FlutterSoundRecorder? _recorder;
   FlutterSoundPlayer? _player;
@@ -42,6 +44,11 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
   String _result = '';
   String _filePath = '';
 
+  Map<String, double> _probabilities = {};
+  String _finalLabel = '';
+  double _confidence = 0.0;
+
+  // Intepretador do TensorFlowLite
   Interpreter? _interpreter;
 
   @override
@@ -58,20 +65,7 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
     await _recorder!.openRecorder();
   }
 
-  Future<void> _loadModel() async {
-    _interpreter = await Interpreter.fromAsset(
-      'assets/cough_model_quant.tflite',
-    );
-    _interpreter!.allocateTensors();
-
-    // Debug: Print input and output tensor details
-    var inputTensors = _interpreter!.getInputTensors();
-    var outputTensors = _interpreter!.getOutputTensors();
-
-    print('Input tensors: $inputTensors');
-    print('Output tensors: $outputTensors');
-  }
-
+  // GRAVADOR DE ÁUDIO
   Future<void> _startRecording() async {
     Directory tempDir = await getTemporaryDirectory();
     _filePath = '${tempDir.path}/cough.wav';
@@ -90,6 +84,7 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
     _analyzeCough();
   }
 
+  // UPLOAD/ANALIZAR O AUDIO
   Future<void> _pickAndAnalyzeFile() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.audio,
@@ -102,9 +97,17 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
     }
   }
 
+  // MODELO TFLITE NO DISPOSITIVO
+  Future<void> _loadModel() async {
+    _interpreter = await Interpreter.fromAsset(
+      'assets/cough_model_quant.tflite',
+    );
+    _interpreter!.allocateTensors();
+  }
+
   Future<void> _analyzeCough() async {
     try {
-      // Preprocess audio
+      // Processa o audio
       List<double> audioData = await _loadAudioData(_filePath);
       if (audioData.isEmpty) {
         setState(() => _result = 'Erro: Áudio vazio');
@@ -115,38 +118,63 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
         throw Exception('Modelo ainda não carregado');
       }
 
-      List<double> normalized = _normalizeAudio(audioData);
-      List<double> denoised = _removeNoise(normalized);
-      List<List<double>> spectrogram = _generateSpectrogram(denoised);
+      // Converter para Float32
+      Float32List signal = Float32List.fromList(audioData);
 
-      // Run model - input shape [1, 128, 128, 3] for quantized int8 model
-      // Flatten into single Int8List [1*128*128*3]
-      List<int> flatInput = [];
+      // PRÉ-PROCESSAMENTO
+      signal = _normalizeAndTrim(signal);
+
+      // INICIALIZA A FUNÇÃO DO ESPECTROGRAMA
+      final List<List<double>> spectrogram = _generateModelInput(signal);
+
+      // Preparação do Buffer para o Modelo
+      final Int8List inputBuffer = Int8List(1 * 128 * 128 * 3);
+      int index = 0;
       for (int i = 0; i < 128; i++) {
         for (int j = 0; j < 128; j++) {
           int val = ((spectrogram[i][j] * 255) - 128).toInt().clamp(-128, 127);
-          flatInput.add(val); // R
-          flatInput.add(val); // G
-          flatInput.add(val); // B
+
+          inputBuffer[index++] = val; // Canal R
+          inputBuffer[index++] = val; // Canal G
+          inputBuffer[index++] = val; // Canal B
         }
       }
 
-      final Int8List input = Int8List.fromList(flatInput);
-      final reshapedInput = input.reshape([1, 128, 128, 3]);
-
+      final reshapedInput = inputBuffer.reshape([1, 128, 128, 3]);
       final Int8List outputBuffer = Int8List(3);
       final reshapedOutput = outputBuffer.reshape([1, 3]);
 
-      _interpreter!.run(reshapedInput, reshapedOutput);
+      // PREDIÇÃO (Execução da inferência pelo TFLite)
+      _interpreter?.run(reshapedInput, reshapedOutput);
 
-      // Get result - scale back to probabilities
-      List<double> probabilities = outputBuffer
-          .map((e) => ((e + 128) / 255.0).clamp(0.0, 1.0))
-          .toList();
-      int maxIndex = probabilities.indexOf(probabilities.reduce(max));
-      List<String> labels = ['Normal', 'Pneumonia', 'Bronquite'];
+      // Obter resultado - escalar de volta para probabilidades
+      final labels = ['Normal', 'Bronquite', 'Pneumonia'];
+
+      // Cálculo de Softmax e Probabilidades
+      List<double> logits = List.generate(
+        3,
+        (i) => reshapedOutput[0][i].toDouble(),
+      );
+
+      double maxLogit = logits.reduce(max);
+      List<double> exps = logits.map((e) => exp(e - maxLogit)).toList();
+      double sumExps = exps.reduce((a, b) => a + b);
+      List<double> probsList = exps.map((e) => e / sumExps).toList();
+
+      final Map<String, double> probs = {
+        for (int i = 0; i < labels.length; i++) labels[i]: probsList[i],
+      };
+
+      final sorted = probs.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+
+      final best = sorted.first;
+
       setState(() {
-        _result = labels[maxIndex];
+        _probabilities = probs;
+        _finalLabel = best.key;
+        _confidence = best.value;
+        _result = ''; // Limpa todos os erros antigos
       });
     } catch (e) {
       setState(() => _result = 'Erro na análise: $e');
@@ -154,10 +182,11 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
   }
 
   Future<List<double>> _loadAudioData(String path) async {
-    // Simplified WAV parsing for 16-bit PCM
+    // Análise simplificada de WAV para PCM de 16 bits
     File file = File(path);
     List<int> bytes = await file.readAsBytes();
-    // Skip WAV header (44 bytes) and convert to double
+
+    // Pular cabeçalho WAV (44 bytes) e converter para double
     List<double> samples = [];
     for (int i = 44; i < bytes.length; i += 2) {
       int sample = (bytes[i + 1] << 8) | bytes[i];
@@ -167,35 +196,104 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
     return samples;
   }
 
-  List<double> _normalizeAudio(List<double> audio) {
-    double maxVal = audio.reduce(max);
-    return audio.map((e) => e / maxVal).toList();
-  }
+  // NORMALIZAÇÃO
+  Float32List _normalizeAndTrim(Float32List input) {
+    final maxVal = input.map((e) => e.abs()).reduce(max);
+    final normalized = input.map((e) => e / maxVal).toList();
 
-  List<double> _removeNoise(List<double> audio) {
-    // Simple high-pass filter as noise removal
-    List<double> filtered = [];
-    for (int i = 1; i < audio.length; i++) {
-      filtered.add(audio[i] - 0.9 * audio[i - 1]);
-    }
-    return filtered;
-  }
-
-  List<List<double>> _generateSpectrogram(List<double> audio) {
-    // Simplified spectrogram generation (placeholder - real implementation would use FFT)
-    // Assume 128x128 spectrogram
-    List<List<double>> spectrogram = List.generate(
-      128,
-      (_) => List.filled(128, 0.0),
+    // REMOÇÃO DE RUÍDO (Filtro de threshold para silêncio/ruído de fundo)
+    return Float32List.fromList(
+      normalized.where((e) => e.abs() > 0.02).toList(),
     );
-    // Fill with audio data in a simple way
-    int minLen = min(audio.length, 128 * 128);
-    for (int i = 0; i < minLen; i++) {
-      int row = i ~/ 128;
-      int col = i % 128;
-      spectrogram[row][col] = audio[i].abs();
+  }
+
+  // GERAÇÃO DO ESPECTROGRAMA (FFT)
+  List<List<double>> _generateModelInput(Float32List audio) {
+    // Definimos as dimensões da "imagem" que o modelo espera (128x128 pixels/pontos)
+    const int targetHeight = 128;
+    const int targetWidth = 128;
+
+    // O tamanho da FFT (Fast Fourier Transform) define a resolução da análise
+    // Usamos o dobro da altura para obter a resolução de frequência correta
+    const int fftSize = targetHeight * 2;
+
+    // Inicializamos o motor matemático da FFT
+    final fft = FFT(fftSize);
+
+    // Janela de Hanning: Suaviza as bordas de cada pedaço de áudio para evitar ruído matemático (spectral leakage)
+    final window = Window.hanning(fftSize);
+
+    List<List<double>> spectrogram = [];
+
+    // Calculamos o 'pulo' (hop) necessário para cobrir o áudio e gerar exatamente 128 colunas
+    int hopSize = (audio.length / targetWidth).floor();
+    if (hopSize < 1) hopSize = 1;
+
+    // Loop principal: percorre o áudio criando as colunas da nossa imagem
+    for (int i = 0; i < targetWidth; i++) {
+      int start = i * hopSize;
+      int end = start + fftSize;
+
+      // Extração de um frame (pedaço) do áudio
+      List<double> chunk;
+      if (end < audio.length) {
+        chunk = audio.sublist(start, end).toList();
+      } else {
+        // Zero Padding: se o áudio for curto, preenchemos com silêncio para manter o tamanho fixo
+        chunk = audio.sublist(start, audio.length).toList();
+        chunk.addAll(List.filled(fftSize - chunk.length, 0.0));
+      }
+
+      // JANELAMENTO: Aplicamos a função Hanning multiplicando o áudio pela curva da janela
+      final windowedChunk = List<double>.generate(chunk.length, (idx) {
+        return chunk[idx] * window[idx];
+      });
+
+      // FFT REAL: Converte o áudio (ondas no tempo) para o domínio da frequência
+      final freqDomain = fft.realFft(windowedChunk);
+
+      List<double> magnitudes = [];
+      for (int j = 0; j < targetHeight; j++) {
+        // A FFT retorna números complexos (Parte Real e Imaginária)
+        final complex = freqDomain[j];
+        final double real = complex.x;
+        final double imag = complex.y;
+
+        // CÁLCULO DA MAGNITUDE: Representa a "força" daquela frequência específica (Volume)
+        double mag = sqrt(real * real + imag * imag);
+        double logMag = log(mag + 1e-6);
+        magnitudes.add(logMag);
+      }
+
+      // Adicionamos a coluna de frequências à nossa matriz final
+      spectrogram.add(magnitudes);
     }
-    return spectrogram;
+
+    // NORMALIZAÇÃO MIN-MAX: Ajustamos todos os valores para ficarem entre 0.0 e 1.0
+    double maxVal = -double.infinity;
+    double minVal = double.infinity;
+
+    // Encontra os limites (mínimo e máximo) de toda a matriz
+    for (var row in spectrogram) {
+      for (var val in row) {
+        if (val > maxVal) maxVal = val;
+        if (val < minVal) minVal = val;
+      }
+    }
+
+    List<List<double>> normalizedSpectrogram = [];
+    for (var row in spectrogram) {
+      List<double> normRow = [];
+      for (var val in row) {
+        double norm = (val - minVal) / (maxVal - minVal);
+        // Proteção contra divisões por zero se o áudio estiver totalmente em silêncio
+        normRow.add(norm.isNaN ? 0.0 : norm);
+      }
+      normalizedSpectrogram.add(normRow);
+    }
+
+    // TERMINA E RETORNA O RESULTADO DO ESPECTROGRAMA
+    return normalizedSpectrogram;
   }
 
   @override
@@ -206,6 +304,7 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
     super.dispose();
   }
 
+  // INTERFACE DO APP
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -225,7 +324,32 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
             ),
             const SizedBox(height: 20),
             if (_result.isNotEmpty)
-              Text('Resultado: $_result', style: const TextStyle(fontSize: 24)),
+              Text(_result, style: const TextStyle(color: Colors.red))
+            // INTERFACE DE RESULTADO (Exibição dos riscos de bronquite/pneumonia)
+            else if (_probabilities.isNotEmpty)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ..._probabilities.entries.map(
+                    (e) => Text(
+                      '${e.key}: ${(e.value * 100).toStringAsFixed(0)}%',
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Resultado: $_finalLabel',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Text(
+                    'Confiança: ${(_confidence * 100).toStringAsFixed(0)}%',
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                ],
+              ),
             const SizedBox(height: 20),
             const Text(
               'Aviso: Este aplicativo não substitui diagnóstico médico.',

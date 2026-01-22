@@ -36,10 +36,11 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_sound: ^9.2.13
   tflite_flutter: ^0.12.1
-  fft: ^0.5.1
   permission_handler: ^11.0.1
   path_provider: ^2.1.1
   file_picker: ^8.0.0+1
+  fft: ^0.5.1
+  fftea: ^1.4.0
 
 dev_dependencies:
   flutter_test:
@@ -64,6 +65,7 @@ flutter:
 
   # To add assets to your application, add an assets section, like this:
   assets:
+    - assets/cough_model_final_quant.tflite
     - assets/cough_model_quant.tflite
 
   # An image asset can refer to one or more resolution-specific "variants", see
