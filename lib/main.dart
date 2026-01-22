@@ -24,6 +24,7 @@ class MyApp extends StatelessWidget {
       title: 'Análise de Tosse',
       theme: ThemeData(primarySwatch: Colors.blue),
       home: const CoughAnalysisPage(),
+      debugShowCheckedModeBanner: false,
     );
   }
 }
