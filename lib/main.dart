@@ -33,6 +33,7 @@ class CoughAnalysisPage extends StatefulWidget {
   const CoughAnalysisPage({super.key});
 
   @override
+  // ignore: library_private_types_in_public_api
   _CoughAnalysisPageState createState() => _CoughAnalysisPageState();
 }
 
@@ -101,7 +102,7 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
   // MODELO TFLITE NO DISPOSITIVO
   Future<void> _loadModel() async {
     _interpreter = await Interpreter.fromAsset(
-      'assets/cough_model_quant.tflite',
+      'assets/cough_model_float32.tflite',
     );
     _interpreter!.allocateTensors();
   }
@@ -129,11 +130,11 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
       final List<List<double>> spectrogram = _generateModelInput(signal);
 
       // Preparação do Buffer para o Modelo
-      final Int8List inputBuffer = Int8List(1 * 128 * 128 * 3);
+      final Float32List inputBuffer = Float32List(1 * 128 * 128 * 3);
       int index = 0;
       for (int i = 0; i < 128; i++) {
         for (int j = 0; j < 128; j++) {
-          int val = ((spectrogram[i][j] * 255) - 128).toInt().clamp(-128, 127);
+          double val = spectrogram[i][j];
 
           inputBuffer[index++] = val; // Canal R
           inputBuffer[index++] = val; // Canal G
@@ -142,7 +143,7 @@ class _CoughAnalysisPageState extends State<CoughAnalysisPage> {
       }
 
       final reshapedInput = inputBuffer.reshape([1, 128, 128, 3]);
-      final Int8List outputBuffer = Int8List(3);
+      final Float32List outputBuffer = Float32List(3);
       final reshapedOutput = outputBuffer.reshape([1, 3]);
 
       // PREDIÇÃO (Execução da inferência pelo TFLite)
